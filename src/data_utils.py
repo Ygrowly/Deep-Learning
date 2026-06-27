@@ -4,6 +4,7 @@ import shutil
 import numpy as np
 from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
+from PIL import ImageOps
 
 from .config import (
     BATCH_SIZE,
@@ -57,6 +58,82 @@ def build_transforms(img_size: int = IMG_SIZE):
     eval_transform = transforms.Compose(
         [
             transforms.Resize((img_size, img_size)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ]
+    )
+    return train_transform, eval_transform
+
+
+def build_finetune_transforms(img_size: int = IMG_SIZE):
+    train_transform = transforms.Compose(
+        [
+            transforms.Resize(256),
+            transforms.CenterCrop(img_size),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomRotation(degrees=10),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ]
+    )
+    eval_transform = transforms.Compose(
+        [
+            transforms.Resize(256),
+            transforms.CenterCrop(img_size),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ]
+    )
+    return train_transform, eval_transform
+
+
+class FundusPreprocess:
+    def __init__(self, crop_black=True, enhance_contrast=True, black_threshold=12, margin=8):
+        self.crop_black = crop_black
+        self.enhance_contrast = enhance_contrast
+        self.black_threshold = black_threshold
+        self.margin = margin
+
+    def __call__(self, img):
+        img = img.convert("RGB")
+        if self.crop_black:
+            arr = np.asarray(img)
+            mask = arr.max(axis=2) > self.black_threshold
+            if mask.any():
+                ys, xs = np.where(mask)
+                left = max(int(xs.min()) - self.margin, 0)
+                upper = max(int(ys.min()) - self.margin, 0)
+                right = min(int(xs.max()) + self.margin + 1, img.width)
+                lower = min(int(ys.max()) + self.margin + 1, img.height)
+                if right > left and lower > upper:
+                    img = img.crop((left, upper, right, lower))
+
+        if self.enhance_contrast:
+            # Lightweight dependency-free contrast enhancement. This is intentionally
+            # milder than full CLAHE to avoid amplifying artifacts in low-quality images.
+            img = ImageOps.autocontrast(img, cutoff=1)
+        return img
+
+
+def build_preprocess_finetune_transforms(img_size: int = IMG_SIZE, enhance_contrast=True):
+    train_transform = transforms.Compose(
+        [
+            FundusPreprocess(crop_black=True, enhance_contrast=enhance_contrast),
+            transforms.Resize(256),
+            transforms.CenterCrop(img_size),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomRotation(degrees=10),
+            transforms.ColorJitter(brightness=0.1, contrast=0.1),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ]
+    )
+    eval_transform = transforms.Compose(
+        [
+            FundusPreprocess(crop_black=True, enhance_contrast=enhance_contrast),
+            transforms.Resize(256),
+            transforms.CenterCrop(img_size),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ]
@@ -122,3 +199,64 @@ def create_dataloaders(data_dir: Path = DATA_DIR, batch_size: int = BATCH_SIZE):
     }
     return train_loader, val_loader, test_loader, metadata
 
+
+def create_finetune_dataloaders(data_dir: Path = DATA_DIR, batch_size: int = BATCH_SIZE):
+    train_transform, eval_transform = build_finetune_transforms()
+    base_dataset = datasets.ImageFolder(data_dir)
+    train_dataset_full = datasets.ImageFolder(data_dir, transform=train_transform)
+    eval_dataset_full = datasets.ImageFolder(data_dir, transform=eval_transform)
+
+    targets = np.array(base_dataset.targets)
+    train_idx, val_idx, test_idx = stratified_split_indices(targets)
+
+    train_ds = Subset(train_dataset_full, train_idx)
+    val_ds = Subset(eval_dataset_full, val_idx)
+    test_ds = Subset(eval_dataset_full, test_idx)
+
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=NUM_WORKERS)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=NUM_WORKERS)
+    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=NUM_WORKERS)
+
+    metadata = {
+        "class_names": base_dataset.classes,
+        "class_to_idx": base_dataset.class_to_idx,
+        "targets": targets,
+        "train_idx": train_idx,
+        "val_idx": val_idx,
+        "test_idx": test_idx,
+        "train_distribution": split_distribution(train_idx, targets, base_dataset.classes),
+        "val_distribution": split_distribution(val_idx, targets, base_dataset.classes),
+        "test_distribution": split_distribution(test_idx, targets, base_dataset.classes),
+    }
+    return train_loader, val_loader, test_loader, metadata
+
+
+def create_preprocess_finetune_dataloaders(data_dir: Path = DATA_DIR, batch_size: int = BATCH_SIZE):
+    train_transform, eval_transform = build_preprocess_finetune_transforms()
+    base_dataset = datasets.ImageFolder(data_dir)
+    train_dataset_full = datasets.ImageFolder(data_dir, transform=train_transform)
+    eval_dataset_full = datasets.ImageFolder(data_dir, transform=eval_transform)
+
+    targets = np.array(base_dataset.targets)
+    train_idx, val_idx, test_idx = stratified_split_indices(targets)
+
+    train_ds = Subset(train_dataset_full, train_idx)
+    val_ds = Subset(eval_dataset_full, val_idx)
+    test_ds = Subset(eval_dataset_full, test_idx)
+
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=NUM_WORKERS)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=NUM_WORKERS)
+    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=NUM_WORKERS)
+
+    metadata = {
+        "class_names": base_dataset.classes,
+        "class_to_idx": base_dataset.class_to_idx,
+        "targets": targets,
+        "train_idx": train_idx,
+        "val_idx": val_idx,
+        "test_idx": test_idx,
+        "train_distribution": split_distribution(train_idx, targets, base_dataset.classes),
+        "val_distribution": split_distribution(val_idx, targets, base_dataset.classes),
+        "test_distribution": split_distribution(test_idx, targets, base_dataset.classes),
+    }
+    return train_loader, val_loader, test_loader, metadata

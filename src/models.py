@@ -8,6 +8,12 @@ try:
 except Exception:
     ResNet18_Weights = None
 
+try:
+    from torchvision.models import DenseNet121_Weights, EfficientNet_B0_Weights
+except Exception:
+    DenseNet121_Weights = None
+    EfficientNet_B0_Weights = None
+
 
 class BaselineCNN(nn.Module):
     def __init__(self, num_classes: int):
@@ -88,3 +94,65 @@ def build_resnet18(
         param.requires_grad = True
 
     return model.to(device), note
+
+
+def build_densenet121_finetune(num_classes: int, device=DEVICE, allow_download: bool = True):
+    weights = DenseNet121_Weights.DEFAULT if DenseNet121_Weights is not None else None
+    try:
+        model = models.densenet121(weights=weights if allow_download else None)
+        note = "使用 torchvision.models.densenet121 的 ImageNet 预训练权重。"
+    except Exception as exc:
+        model = models.densenet121(weights=None) if weights is not None else models.densenet121(pretrained=False)
+        note = f"DenseNet121 预训练权重加载失败，使用随机初始化。原因：{exc}"
+
+    for param in model.parameters():
+        param.requires_grad = False
+    for param in model.features.denseblock4.parameters():
+        param.requires_grad = True
+
+    in_features = model.classifier.in_features
+    model.classifier = nn.Linear(in_features, num_classes)
+    for param in model.classifier.parameters():
+        param.requires_grad = True
+
+    param_groups = [
+        {"params": [p for p in model.features.denseblock4.parameters() if p.requires_grad], "lr": 3e-5},
+        {"params": [p for p in model.classifier.parameters() if p.requires_grad], "lr": 3e-4},
+    ]
+    return model.to(device), param_groups, note
+
+
+def build_efficientnet_b0_finetune(num_classes: int, device=DEVICE, allow_download: bool = True):
+    weights = EfficientNet_B0_Weights.DEFAULT if EfficientNet_B0_Weights is not None else None
+    try:
+        model = models.efficientnet_b0(weights=weights if allow_download else None)
+        note = "使用 torchvision.models.efficientnet_b0 的 ImageNet 预训练权重。"
+    except Exception as exc:
+        model = models.efficientnet_b0(weights=None) if weights is not None else models.efficientnet_b0(pretrained=False)
+        note = f"EfficientNet-B0 预训练权重加载失败，使用随机初始化。原因：{exc}"
+
+    for param in model.parameters():
+        param.requires_grad = False
+    for param in model.features[-2].parameters():
+        param.requires_grad = True
+    for param in model.features[-1].parameters():
+        param.requires_grad = True
+
+    in_features = model.classifier[1].in_features
+    model.classifier[1] = nn.Linear(in_features, num_classes)
+    for param in model.classifier.parameters():
+        param.requires_grad = True
+
+    param_groups = [
+        {
+            "params": [
+                p
+                for module in (model.features[-2], model.features[-1])
+                for p in module.parameters()
+                if p.requires_grad
+            ],
+            "lr": 3e-5,
+        },
+        {"params": [p for p in model.classifier.parameters() if p.requires_grad], "lr": 3e-4},
+    ]
+    return model.to(device), param_groups, note

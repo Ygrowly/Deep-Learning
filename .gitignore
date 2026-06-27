@@ -25,3 +25,5 @@ checkpoints/
 
 # Notebook/runtime noise
 .ipynb_checkpoints/
+
+scripts/

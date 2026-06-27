@@ -149,3 +149,132 @@ def show_saved_image(filename, title=None, output_dir: Path = OUTPUT_DIR):
         plt.title(title)
     plt.show()
 
+
+def _short_model_name(name):
+    mapping = {
+        "Baseline CNN": "Baseline",
+        "ResNet18 frozen fc": "ResNet18 frozen",
+        "ResNet18 fine-tune layer4": "ResNet18 layer4",
+        "ResNet18 layer4 + preprocessing": "ResNet18 prep",
+        "DenseNet121 fine-tune": "DenseNet121",
+        "EfficientNet-B0 fine-tune": "EfficientNet-B0",
+    }
+    return mapping.get(name, name)
+
+
+def plot_overall_metric_comparison(rows, save_path: Path | None = None):
+    names = [_short_model_name(row["model"]) for row in rows]
+    acc = [row["accuracy"] for row in rows]
+    f1 = [row["macro_f1"] for row in rows]
+
+    x = np.arange(len(names))
+    width = 0.36
+    fig, ax = plt.subplots(figsize=(10, 5))
+    acc_bars = ax.bar(x - width / 2, acc, width, label="Accuracy", color="#4C78A8")
+    f1_bars = ax.bar(x + width / 2, f1, width, label="Macro F1", color="#F58518")
+
+    ax.set_title("Overall Model Comparison")
+    ax.set_ylabel("Score")
+    ax.set_ylim(0, 1.0)
+    ax.set_xticks(x)
+    ax.set_xticklabels(names, rotation=20, ha="right")
+    ax.legend()
+    ax.grid(axis="y", linestyle="--", alpha=0.25)
+
+    for bars in (acc_bars, f1_bars):
+        for bar in bars:
+            value = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width() / 2, value + 0.01, f"{value:.3f}", ha="center", va="bottom", fontsize=8)
+
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=160)
+    plt.show()
+
+
+def plot_metric_delta_vs_reference(rows, reference_model="ResNet18 fine-tune layer4", save_path: Path | None = None):
+    reference = next(row for row in rows if row["model"] == reference_model)
+    names = [_short_model_name(row["model"]) for row in rows if row["model"] != reference_model]
+    acc_delta = [row["accuracy"] - reference["accuracy"] for row in rows if row["model"] != reference_model]
+    f1_delta = [row["macro_f1"] - reference["macro_f1"] for row in rows if row["model"] != reference_model]
+
+    y = np.arange(len(names))
+    height = 0.35
+    fig, ax = plt.subplots(figsize=(9, 4.8))
+    ax.barh(y - height / 2, acc_delta, height, label="Accuracy Δ", color="#54A24B")
+    ax.barh(y + height / 2, f1_delta, height, label="Macro F1 Δ", color="#B279A2")
+    ax.axvline(0, color="#333333", linewidth=1)
+    ax.set_title("Metric Difference Compared with ResNet18 Layer4")
+    ax.set_xlabel("Score Difference")
+    ax.set_yticks(y)
+    ax.set_yticklabels(names)
+    ax.legend()
+    ax.grid(axis="x", linestyle="--", alpha=0.25)
+
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=160)
+    plt.show()
+
+
+def _parse_class_f1(report_text, class_names, section_title=None):
+    segment = report_text
+    if section_title and section_title in report_text:
+        segment = report_text[report_text.index(section_title) :]
+
+    scores = {}
+    for line in segment.splitlines():
+        parts = line.split()
+        if len(parts) >= 5 and parts[0] in class_names:
+            scores[parts[0]] = float(parts[3])
+            if len(scores) == len(class_names):
+                break
+    return scores
+
+
+def load_class_f1_table(output_dir: Path = OUTPUT_DIR, class_names=None):
+    class_names = class_names or CLASS_NAMES
+    report_specs = [
+        ("Baseline CNN", "classification_report.txt", "Baseline CNN 测试集分类报告"),
+        ("ResNet18 frozen fc", "classification_report.txt", "ResNet18 测试集分类报告"),
+        ("ResNet18 fine-tune layer4", "resnet18_finetune_classification_report.txt", None),
+        ("ResNet18 layer4 + preprocessing", "resnet18_preprocess_finetune_classification_report.txt", None),
+        ("DenseNet121 fine-tune", "densenet121_finetune_classification_report.txt", None),
+        ("EfficientNet-B0 fine-tune", "efficientnet_b0_finetune_classification_report.txt", None),
+    ]
+
+    rows = []
+    for model_name, filename, section_title in report_specs:
+        path = output_dir / filename
+        if not path.exists():
+            continue
+        report_text = path.read_text(encoding="utf-8")
+        scores = _parse_class_f1(report_text, class_names, section_title=section_title)
+        if scores:
+            rows.append({"model": model_name, **scores})
+    return rows
+
+
+def plot_class_f1_heatmap(class_f1_rows, class_names=None, save_path: Path | None = None):
+    class_names = class_names or CLASS_NAMES
+    model_names = [_short_model_name(row["model"]) for row in class_f1_rows]
+    matrix = np.array([[row[class_name] for class_name in class_names] for row in class_f1_rows])
+
+    fig, ax = plt.subplots(figsize=(9, 5.2))
+    im = ax.imshow(matrix, cmap="YlGnBu", vmin=0.35, vmax=1.0)
+    ax.figure.colorbar(im, ax=ax, label="F1-score")
+    ax.set_title("Class-wise F1-score Heatmap")
+    ax.set_xticks(np.arange(len(class_names)))
+    ax.set_xticklabels(class_names, rotation=25, ha="right")
+    ax.set_yticks(np.arange(len(model_names)))
+    ax.set_yticklabels(model_names)
+
+    for i in range(matrix.shape[0]):
+        for j in range(matrix.shape[1]):
+            value = matrix[i, j]
+            ax.text(j, i, f"{value:.3f}", ha="center", va="center", color="white" if value > 0.78 else "black", fontsize=8)
+
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=160)
+    plt.show()
